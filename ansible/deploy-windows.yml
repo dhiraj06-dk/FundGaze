@@ -1,0 +1,118 @@
+---
+# ============================================================
+# Ansible Playbook: Deploy FundGaze to Windows Server
+# Target: 172.17.86.182
+# Connection: WinRM (NTLM)
+# Prerequisite: Docker Desktop or Docker CE must be installed
+#               on the Windows Server with Linux containers mode
+# ============================================================
+
+- name: Deploy FundGaze Application on Windows Server
+  hosts: windows_servers
+  vars:
+    app_name: fundgaze
+    app_port: 8080
+    docker_image: "your_dockerhub_username/fundgaze:latest"    # overridden by Jenkinsfile
+    # MongoDB running on the Linux server - Windows app points there
+    mongo_host: "172.17.86.44"
+    mongo_port: 27017
+    network_name: fundgaze-network
+    secret_key: "change_this_to_a_strong_secret"               # Override via Jenkins credentials
+
+  tasks:
+
+    # ----------------------------------------------------------
+    - name: Check Docker is available
+      win_shell: docker --version
+      register: docker_version
+      failed_when: docker_version.rc != 0
+
+    - name: Show Docker version
+      debug:
+        msg: "Docker version on Windows: {{ docker_version.stdout }}"
+
+    # ----------------------------------------------------------
+    - name: Create Docker network (if not exists)
+      win_shell: |
+        $networks = docker network ls --filter name={{ network_name }} --format "{{ '{{' }}.Name{{ '}}' }}"
+        if (-not $networks) {
+            docker network create {{ network_name }}
+            Write-Host "Network {{ network_name }} created"
+        } else {
+            Write-Host "Network {{ network_name }} already exists"
+        }
+
+    # ----------------------------------------------------------
+    - name: Pull latest FundGaze Docker image
+      win_shell: docker pull {{ docker_image }}
+      register: pull_result
+
+    - name: Show pull result
+      debug:
+        msg: "{{ pull_result.stdout }}"
+
+    # ----------------------------------------------------------
+    - name: Stop existing app container (if running)
+      win_shell: |
+        $container = docker ps -a --filter name={{ app_name }}-app --format "{{ '{{' }}.Names{{ '}}' }}"
+        if ($container) {
+            docker stop {{ app_name }}-app | Out-Null
+            docker rm {{ app_name }}-app | Out-Null
+            Write-Host "Old container removed"
+        } else {
+            Write-Host "No existing container found"
+        }
+
+    # ----------------------------------------------------------
+    - name: Run FundGaze application container on Windows
+      win_shell: |
+        docker run -d `
+          --name {{ app_name }}-app `
+          --restart unless-stopped `
+          --network {{ network_name }} `
+          -p {{ app_port }}:8080 `
+          -e NODE_ENV=production `
+          -e MONGO_DB_URL=mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ app_name }} `
+          -e SECRET_KEY={{ secret_key }} `
+          --label app=fundgaze `
+          --label environment=production `
+          {{ docker_image }}
+      register: run_result
+
+    - name: Show run result
+      debug:
+        msg: "Container started with ID: {{ run_result.stdout }}"
+
+    # ----------------------------------------------------------
+    - name: Wait for container to be running
+      win_shell: docker inspect --format="{{ '{{' }}.State.Status{{ '}}' }}" {{ app_name }}-app
+      register: container_status
+      until: "'running' in container_status.stdout"
+      retries: 10
+      delay: 5
+
+    # ----------------------------------------------------------
+    - name: Verify app is responding on port {{ app_port }}
+      win_shell: |
+        Start-Sleep -Seconds 5
+        $response = Invoke-WebRequest -Uri "http://localhost:{{ app_port }}" -UseBasicParsing -TimeoutSec 10
+        Write-Host "HTTP Status: $($response.StatusCode)"
+      register: health_check
+      failed_when: false
+
+    - name: Show health check result
+      debug:
+        msg: "{{ health_check.stdout | default('Health check skipped or failed') }}"
+
+    # ----------------------------------------------------------
+    - name: Clean up dangling Docker images
+      win_shell: docker image prune -f
+      failed_when: false
+
+    # ----------------------------------------------------------
+    - name: Show deployment summary
+      debug:
+        msg: >
+          FundGaze deployed on Windows server {{ inventory_hostname }}.
+          App URL: http://{{ ansible_host }}:{{ app_port }}
+          MongoDB: {{ mongo_host }}:{{ mongo_port }}

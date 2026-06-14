@@ -1,0 +1,14 @@
+---
+# ============================================================
+# Master Ansible Playbook: Deploy FundGaze to All Servers
+# Usage:
+#   ansible-playbook -i ansible/inventory.ini ansible/playbook.yml \
+#     -e "docker_image=youruser/fundgaze:1" \
+#     -e "secret_key=your_jwt_secret"
+# ============================================================
+
+- name: Deploy FundGaze to Linux Server
+  import_playbook: deploy-linux.yml
+
+- name: Deploy FundGaze to Windows Server
+  import_playbook: deploy-windows.yml

@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fundgaze-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=development
+      - MONGO_DB_URL=mongodb://mongodb:27017/fundgaze
+      - SECRET_KEY=${SECRET_KEY:-change_this_secret_in_production}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    volumes:
+      # Mount public folder for static uploads (multer)
+      - ./public:/app/public
+    networks:
+      - fundgaze-network
+
+  mongodb:
+    image: mongo:7.0
+    container_name: fundgaze-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=fundgaze
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - fundgaze-network
+
+volumes:
+  mongo_data:
+    driver: local
+
+networks:
+  fundgaze-network:
+    driver: bridge

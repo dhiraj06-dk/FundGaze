@@ -1,0 +1,160 @@
+---
+# ============================================================
+# Ansible Playbook: Deploy FundGaze to Linux Server
+# Target: 172.17.86.44
+# ============================================================
+
+- name: Deploy FundGaze Application on Linux Server
+  hosts: linux_servers
+  become: yes
+  vars:
+    app_name: fundgaze
+    app_port: 8080
+    mongo_port: 27017
+    docker_image: "your_dockerhub_username/fundgaze:latest"   # overridden by Jenkinsfile
+    mongo_data_volume: fundgaze_mongo_data
+    network_name: fundgaze-network
+    secret_key: "change_this_to_a_strong_secret"              # Override via Jenkins credentials
+
+  tasks:
+
+    # ----------------------------------------------------------
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_pkg_mgr == 'apt'
+
+    - name: Update yum cache
+      yum:
+        update_cache: yes
+      when: ansible_pkg_mgr == 'yum'
+
+    # ----------------------------------------------------------
+    - name: Install required packages (Debian/Ubuntu)
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - python3-pip
+        state: present
+      when: ansible_pkg_mgr == 'apt'
+
+    - name: Install required packages (RHEL/CentOS)
+      yum:
+        name:
+          - ca-certificates
+          - curl
+          - python3-pip
+        state: present
+      when: ansible_pkg_mgr == 'yum'
+
+    # ----------------------------------------------------------
+    - name: Install Docker SDK for Python
+      pip:
+        name: docker
+        state: present
+
+    # ----------------------------------------------------------
+    - name: Ensure Docker service is started and enabled
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    # ----------------------------------------------------------
+    - name: Create Docker network
+      community.docker.docker_network:
+        name: "{{ network_name }}"
+        state: present
+
+    # ----------------------------------------------------------
+    - name: Create MongoDB data volume
+      community.docker.docker_volume:
+        name: "{{ mongo_data_volume }}"
+        state: present
+
+    # ----------------------------------------------------------
+    - name: Pull MongoDB image
+      community.docker.docker_image:
+        name: mongo:7.0
+        source: pull
+
+    # ----------------------------------------------------------
+    - name: Run MongoDB container
+      community.docker.docker_container:
+        name: "{{ app_name }}-mongodb"
+        image: mongo:7.0
+        state: started
+        restart_policy: unless-stopped
+        networks:
+          - name: "{{ network_name }}"
+        volumes:
+          - "{{ mongo_data_volume }}:/data/db"
+        env:
+          MONGO_INITDB_DATABASE: "{{ app_name }}"
+        healthcheck:
+          test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+          start_period: 20s
+
+    # ----------------------------------------------------------
+    - name: Wait for MongoDB to be healthy
+      community.docker.docker_container_info:
+        name: "{{ app_name }}-mongodb"
+      register: mongo_info
+      until: mongo_info.container.State.Health.Status == "healthy"
+      retries: 12
+      delay: 10
+
+    # ----------------------------------------------------------
+    - name: Pull FundGaze application image
+      community.docker.docker_image:
+        name: "{{ docker_image }}"
+        source: pull
+
+    # ----------------------------------------------------------
+    - name: Stop and remove old app container (if exists)
+      community.docker.docker_container:
+        name: "{{ app_name }}-app"
+        state: absent
+        force_kill: yes
+
+    # ----------------------------------------------------------
+    - name: Run FundGaze application container
+      community.docker.docker_container:
+        name: "{{ app_name }}-app"
+        image: "{{ docker_image }}"
+        state: started
+        restart_policy: unless-stopped
+        networks:
+          - name: "{{ network_name }}"
+        ports:
+          - "{{ app_port }}:8080"
+        env:
+          NODE_ENV: "production"
+          MONGO_DB_URL: "mongodb://{{ app_name }}-mongodb:27017/{{ app_name }}"
+          SECRET_KEY: "{{ secret_key }}"
+        labels:
+          app: fundgaze
+          environment: production
+
+    # ----------------------------------------------------------
+    - name: Verify app container is running
+      community.docker.docker_container_info:
+        name: "{{ app_name }}-app"
+      register: app_info
+
+    - name: Show app container status
+      debug:
+        msg: "FundGaze app is {{ app_info.container.State.Status }} on Linux server {{ inventory_hostname }} at port {{ app_port }}"
+
+    # ----------------------------------------------------------
+    - name: Clean up unused Docker images
+      community.docker.docker_prune:
+        images: yes
+        images_filters:
+          dangling: true
