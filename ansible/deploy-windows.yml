@@ -1,118 +1,160 @@
 ---
 # ============================================================
-# Ansible Playbook: Deploy FundGaze to Windows Server
-# Target: 172.17.86.182
-# Connection: WinRM (NTLM)
-# Prerequisite: Docker Desktop or Docker CE must be installed
-#               on the Windows Server with Linux containers mode
+# Ansible Playbook: Deploy FundGaze on Windows Server (PM2)
+# Target   : 172.17.86.182  |  User: deployuser
+# MongoDB  : Runs on Linux server (172.17.86.44:27017)
+#            NO MongoDB installation needed on Windows
+# Prereqs  : Node.js and PM2 already installed on Windows
 # ============================================================
 
-- name: Deploy FundGaze Application on Windows Server
+- name: Deploy FundGaze on Windows Server using PM2
   hosts: windows_servers
   vars:
     app_name: fundgaze
     app_port: 8080
-    docker_image: "your_dockerhub_username/fundgaze:latest"    # overridden by Jenkinsfile
-    # MongoDB running on the Linux server - Windows app points there
+    app_dir: "C:\\fundgaze"
+    github_repo: "https://github.com/dhiraj06-dk/FundGaze.git"
+    github_branch: main
+    # MongoDB runs on Linux server - Windows connects remotely
     mongo_host: "172.17.86.44"
     mongo_port: 27017
-    network_name: fundgaze-network
-    secret_key: "change_this_to_a_strong_secret"               # Override via Jenkins credentials
+    secret_key: "{{ lookup('env', 'SECRET_KEY') | default('change_this_secret', true) }}"
+    node_env: production
 
   tasks:
 
     # ----------------------------------------------------------
-    - name: Check Docker is available
-      win_shell: docker --version
-      register: docker_version
-      failed_when: docker_version.rc != 0
+    # 1. VERIFY PREREQUISITES
+    # ----------------------------------------------------------
+    - name: Check Node.js version
+      win_command: node --version
+      register: node_version
+      failed_when: node_version.rc != 0
 
-    - name: Show Docker version
+    - name: Display Node.js version
       debug:
-        msg: "Docker version on Windows: {{ docker_version.stdout }}"
+        msg: "Node.js: {{ node_version.stdout }}"
 
-    # ----------------------------------------------------------
-    - name: Create Docker network (if not exists)
-      win_shell: |
-        $networks = docker network ls --filter name={{ network_name }} --format "{{ '{{' }}.Name{{ '}}' }}"
-        if (-not $networks) {
-            docker network create {{ network_name }}
-            Write-Host "Network {{ network_name }} created"
-        } else {
-            Write-Host "Network {{ network_name }} already exists"
-        }
+    - name: Check PM2 version
+      win_command: pm2 --version
+      register: pm2_version
+      failed_when: pm2_version.rc != 0
 
-    # ----------------------------------------------------------
-    - name: Pull latest FundGaze Docker image
-      win_shell: docker pull {{ docker_image }}
-      register: pull_result
-
-    - name: Show pull result
+    - name: Display PM2 version
       debug:
-        msg: "{{ pull_result.stdout }}"
+        msg: "PM2: {{ pm2_version.stdout }}"
 
     # ----------------------------------------------------------
-    - name: Stop existing app container (if running)
+    # 2. DEPLOY APPLICATION CODE
+    # ----------------------------------------------------------
+    - name: Check if repo already cloned
+      win_stat:
+        path: "{{ app_dir }}\\.git"
+      register: repo_check
+
+    - name: Clone repository (first time)
+      win_command: git clone {{ github_repo }} {{ app_dir }}
+      when: not repo_check.stat.exists
+
+    - name: Pull latest code (subsequent runs)
       win_shell: |
-        $container = docker ps -a --filter name={{ app_name }}-app --format "{{ '{{' }}.Names{{ '}}' }}"
-        if ($container) {
-            docker stop {{ app_name }}-app | Out-Null
-            docker rm {{ app_name }}-app | Out-Null
-            Write-Host "Old container removed"
-        } else {
-            Write-Host "No existing container found"
-        }
+        cd {{ app_dir }}
+        git fetch origin
+        git reset --hard origin/{{ github_branch }}
+      when: repo_check.stat.exists
 
     # ----------------------------------------------------------
-    - name: Run FundGaze application container on Windows
-      win_shell: |
-        docker run -d `
-          --name {{ app_name }}-app `
-          --restart unless-stopped `
-          --network {{ network_name }} `
-          -p {{ app_port }}:8080 `
-          -e NODE_ENV=production `
-          -e MONGO_DB_URL=mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ app_name }} `
-          -e SECRET_KEY={{ secret_key }} `
-          --label app=fundgaze `
-          --label environment=production `
-          {{ docker_image }}
-      register: run_result
+    # 3. CREATE .env FILE
+    # ----------------------------------------------------------
+    - name: Create .env file pointing to Linux MongoDB
+      win_copy:
+        dest: "{{ app_dir }}\\.env"
+        content: |
+          NODE_ENV={{ node_env }}
+          MONGO_DB_URL=mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ app_name }}
+          SECRET_KEY={{ secret_key }}
 
-    - name: Show run result
+    # ----------------------------------------------------------
+    # 4. INSTALL NODE DEPENDENCIES
+    # ----------------------------------------------------------
+    - name: Install Node.js dependencies
+      win_shell: |
+        cd {{ app_dir }}
+        npm ci --only=production
+      register: npm_result
+
+    - name: Show npm install output
       debug:
-        msg: "Container started with ID: {{ run_result.stdout }}"
+        msg: "{{ npm_result.stdout }}"
 
     # ----------------------------------------------------------
-    - name: Wait for container to be running
-      win_shell: docker inspect --format="{{ '{{' }}.State.Status{{ '}}' }}" {{ app_name }}-app
-      register: container_status
-      until: "'running' in container_status.stdout"
-      retries: 10
-      delay: 5
-
+    # 5. START / RESTART WITH PM2
     # ----------------------------------------------------------
-    - name: Verify app is responding on port {{ app_port }}
-      win_shell: |
-        Start-Sleep -Seconds 5
-        $response = Invoke-WebRequest -Uri "http://localhost:{{ app_port }}" -UseBasicParsing -TimeoutSec 10
-        Write-Host "HTTP Status: $($response.StatusCode)"
-      register: health_check
+    - name: Check if app is running in PM2
+      win_shell: pm2 describe {{ app_name }}
+      register: pm2_check
       failed_when: false
 
-    - name: Show health check result
+    - name: Start app with PM2 (first time)
+      win_shell: |
+        cd {{ app_dir }}
+        pm2 start index.js --name {{ app_name }}
+      when: pm2_check.rc != 0
+
+    - name: Reload app with PM2 (zero-downtime restart)
+      win_shell: pm2 reload {{ app_name }}
+      when: pm2_check.rc == 0
+
+    - name: Save PM2 process list
+      win_shell: pm2 save
+
+    # ----------------------------------------------------------
+    # 6. OPEN WINDOWS FIREWALL PORT
+    # ----------------------------------------------------------
+    - name: Allow app port {{ app_port }} through Windows Firewall
+      win_firewall_rule:
+        name: "FundGaze App Port {{ app_port }}"
+        localport: "{{ app_port }}"
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: yes
+
+    # ----------------------------------------------------------
+    # 7. TEST MONGODB CONNECTIVITY FROM WINDOWS
+    # ----------------------------------------------------------
+    - name: Test TCP connectivity to MongoDB on Linux server
+      win_shell: |
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        try {
+            $tcpClient.Connect("{{ mongo_host }}", {{ mongo_port }})
+            Write-Host "SUCCESS: Can reach MongoDB at {{ mongo_host }}:{{ mongo_port }}"
+        } catch {
+            Write-Host "FAILED: Cannot reach MongoDB at {{ mongo_host }}:{{ mongo_port }} - $_"
+        } finally {
+            $tcpClient.Close()
+        }
+      register: mongo_connectivity
+
+    - name: MongoDB connectivity result
       debug:
-        msg: "{{ health_check.stdout | default('Health check skipped or failed') }}"
+        msg: "{{ mongo_connectivity.stdout }}"
 
     # ----------------------------------------------------------
-    - name: Clean up dangling Docker images
-      win_shell: docker image prune -f
-      failed_when: false
-
+    # 8. VERIFY
     # ----------------------------------------------------------
-    - name: Show deployment summary
+    - name: Show PM2 status
+      win_shell: pm2 list
+      register: pm2_status
+
+    - name: Display PM2 status
+      debug:
+        msg: "{{ pm2_status.stdout }}"
+
+    - name: Deployment summary
       debug:
         msg: >
-          FundGaze deployed on Windows server {{ inventory_hostname }}.
-          App URL: http://{{ ansible_host }}:{{ app_port }}
-          MongoDB: {{ mongo_host }}:{{ mongo_port }}
+          FundGaze deployed on Windows (172.17.86.182).
+          App URL  : http://172.17.86.182:{{ app_port }}
+          MongoDB  : mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ app_name }} (Linux server)

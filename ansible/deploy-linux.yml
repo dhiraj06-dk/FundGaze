@@ -1,160 +1,246 @@
 ---
 # ============================================================
-# Ansible Playbook: Deploy FundGaze to Linux Server
-# Target: 172.17.86.44
+# Ansible Playbook: Deploy FundGaze on Linux Server (PM2)
+# Target  : 172.17.86.44  |  User: deploy
+# MongoDB : Runs as a Docker container on THIS server
+#           Windows server connects to 172.17.86.44:27017
 # ============================================================
 
-- name: Deploy FundGaze Application on Linux Server
+- name: Deploy FundGaze on Linux Server using PM2
   hosts: linux_servers
   become: yes
   vars:
     app_name: fundgaze
     app_port: 8080
+    app_dir: /opt/fundgaze
+    github_repo: "https://github.com/dhiraj06-dk/FundGaze.git"
+    github_branch: main
     mongo_port: 27017
-    docker_image: "your_dockerhub_username/fundgaze:latest"   # overridden by Jenkinsfile
-    mongo_data_volume: fundgaze_mongo_data
-    network_name: fundgaze-network
-    secret_key: "change_this_to_a_strong_secret"              # Override via Jenkins credentials
+    secret_key: "{{ lookup('env', 'SECRET_KEY') | default('change_this_secret', true) }}"
+    node_env: production
 
   tasks:
 
     # ----------------------------------------------------------
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-      when: ansible_pkg_mgr == 'apt'
-
-    - name: Update yum cache
-      yum:
-        update_cache: yes
-      when: ansible_pkg_mgr == 'yum'
-
+    # 1. SYSTEM PREREQUISITES
     # ----------------------------------------------------------
-    - name: Install required packages (Debian/Ubuntu)
-      apt:
-        name:
-          - ca-certificates
-          - curl
-          - gnupg
-          - python3-pip
-        state: present
-      when: ansible_pkg_mgr == 'apt'
-
-    - name: Install required packages (RHEL/CentOS)
+    - name: Install required system packages (RHEL/CentOS/Rocky)
       yum:
         name:
-          - ca-certificates
+          - git
           - curl
-          - python3-pip
+          - firewalld
         state: present
-      when: ansible_pkg_mgr == 'yum'
+      when: ansible_pkg_mgr in ['yum', 'dnf']
 
-    # ----------------------------------------------------------
-    - name: Install Docker SDK for Python
-      pip:
-        name: docker
+    - name: Install required system packages (Debian/Ubuntu)
+      apt:
+        name:
+          - git
+          - curl
+          - ufw
         state: present
+        update_cache: yes
+      when: ansible_pkg_mgr == 'apt'
 
     # ----------------------------------------------------------
-    - name: Ensure Docker service is started and enabled
-      service:
-        name: docker
-        state: started
-        enabled: yes
+    # 2. INSTALL DOCKER (for MongoDB container only)
+    # ----------------------------------------------------------
+    - name: Check if Docker is installed
+      command: docker --version
+      register: docker_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Docker (RHEL/CentOS/Rocky)
+      block:
+        - name: Add Docker repo
+          command: >
+            dnf config-manager --add-repo
+            https://download.docker.com/linux/centos/docker-ce.repo
+          args:
+            creates: /etc/yum.repos.d/docker-ce.repo
+
+        - name: Install Docker CE
+          yum:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+            state: present
+
+        - name: Start and enable Docker
+          service:
+            name: docker
+            state: started
+            enabled: yes
+      when:
+        - docker_check.rc != 0
+        - ansible_pkg_mgr in ['yum', 'dnf']
 
     # ----------------------------------------------------------
-    - name: Create Docker network
-      community.docker.docker_network:
-        name: "{{ network_name }}"
-        state: present
+    # 3. RUN MONGODB CONTAINER
+    # ----------------------------------------------------------
+    - name: Pull MongoDB 7.0 image
+      command: docker pull mongo:7.0
+      changed_when: false
+
+    - name: Check if MongoDB container exists
+      command: docker inspect fundgaze-mongodb
+      register: mongo_container_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create and run MongoDB container
+      command: >
+        docker run -d
+        --name fundgaze-mongodb
+        --restart unless-stopped
+        -p {{ mongo_port }}:27017
+        -v fundgaze_mongo_data:/data/db
+        -e MONGO_INITDB_DATABASE={{ app_name }}
+        mongo:7.0
+      when: mongo_container_check.rc != 0
+
+    - name: Ensure MongoDB container is running (if already exists)
+      command: docker start fundgaze-mongodb
+      when: mongo_container_check.rc == 0
+      failed_when: false
+      changed_when: false
+
+    - name: Wait for MongoDB to be ready
+      wait_for:
+        host: 127.0.0.1
+        port: "{{ mongo_port }}"
+        timeout: 60
 
     # ----------------------------------------------------------
-    - name: Create MongoDB data volume
-      community.docker.docker_volume:
-        name: "{{ mongo_data_volume }}"
-        state: present
+    # 4. OPEN FIREWALL PORTS
+    # ----------------------------------------------------------
+    - name: Open app port in firewall
+      firewalld:
+        port: "{{ app_port }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      when: ansible_pkg_mgr in ['yum', 'dnf']
+      failed_when: false
+
+    - name: Open MongoDB port for Windows server to connect
+      firewalld:
+        port: "{{ mongo_port }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      when: ansible_pkg_mgr in ['yum', 'dnf']
+      failed_when: false
 
     # ----------------------------------------------------------
-    - name: Pull MongoDB image
-      community.docker.docker_image:
-        name: mongo:7.0
-        source: pull
+    # 5. DEPLOY APPLICATION CODE
+    # ----------------------------------------------------------
+    - name: Create app directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: deploy
+        group: deploy
+        mode: '0755'
+
+    - name: Check if repo already cloned
+      stat:
+        path: "{{ app_dir }}/.git"
+      register: repo_check
+
+    - name: Clone repository (first time)
+      git:
+        repo: "{{ github_repo }}"
+        dest: "{{ app_dir }}"
+        version: "{{ github_branch }}"
+        force: yes
+      become_user: deploy
+      when: not repo_check.stat.exists
+
+    - name: Pull latest code (subsequent runs)
+      git:
+        repo: "{{ github_repo }}"
+        dest: "{{ app_dir }}"
+        version: "{{ github_branch }}"
+        force: yes
+        update: yes
+      become_user: deploy
+      when: repo_check.stat.exists
 
     # ----------------------------------------------------------
-    - name: Run MongoDB container
-      community.docker.docker_container:
-        name: "{{ app_name }}-mongodb"
-        image: mongo:7.0
-        state: started
-        restart_policy: unless-stopped
-        networks:
-          - name: "{{ network_name }}"
-        volumes:
-          - "{{ mongo_data_volume }}:/data/db"
-        env:
-          MONGO_INITDB_DATABASE: "{{ app_name }}"
-        healthcheck:
-          test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-          interval: 10s
-          timeout: 5s
-          retries: 5
-          start_period: 20s
+    # 6. CREATE .env FILE
+    # ----------------------------------------------------------
+    - name: Create .env file
+      copy:
+        dest: "{{ app_dir }}/.env"
+        owner: deploy
+        group: deploy
+        mode: '0600'
+        content: |
+          NODE_ENV={{ node_env }}
+          MONGO_DB_URL=mongodb://127.0.0.1:{{ mongo_port }}/{{ app_name }}
+          SECRET_KEY={{ secret_key }}
 
     # ----------------------------------------------------------
-    - name: Wait for MongoDB to be healthy
-      community.docker.docker_container_info:
-        name: "{{ app_name }}-mongodb"
-      register: mongo_info
-      until: mongo_info.container.State.Health.Status == "healthy"
-      retries: 12
-      delay: 10
+    # 7. INSTALL NODE DEPENDENCIES
+    # ----------------------------------------------------------
+    - name: Install Node.js dependencies
+      command: npm ci --only=production
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: deploy
 
     # ----------------------------------------------------------
-    - name: Pull FundGaze application image
-      community.docker.docker_image:
-        name: "{{ docker_image }}"
-        source: pull
+    # 8. START / RESTART WITH PM2
+    # ----------------------------------------------------------
+    - name: Check if app is already running in PM2
+      command: pm2 describe {{ app_name }}
+      register: pm2_check
+      failed_when: false
+      changed_when: false
+      become_user: deploy
+
+    - name: Start app with PM2 (first time)
+      command: pm2 start index.js --name {{ app_name }}
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: deploy
+      when: pm2_check.rc != 0
+
+    - name: Reload app with PM2 (zero-downtime restart)
+      command: pm2 reload {{ app_name }}
+      args:
+        chdir: "{{ app_dir }}"
+      become_user: deploy
+      when: pm2_check.rc == 0
+
+    - name: Save PM2 process list to survive reboots
+      command: pm2 save
+      become_user: deploy
+
+    - name: Setup PM2 startup on system boot
+      command: pm2 startup systemd -u deploy --hp /home/deploy
+      failed_when: false
 
     # ----------------------------------------------------------
-    - name: Stop and remove old app container (if exists)
-      community.docker.docker_container:
-        name: "{{ app_name }}-app"
-        state: absent
-        force_kill: yes
-
+    # 9. VERIFY
     # ----------------------------------------------------------
-    - name: Run FundGaze application container
-      community.docker.docker_container:
-        name: "{{ app_name }}-app"
-        image: "{{ docker_image }}"
-        state: started
-        restart_policy: unless-stopped
-        networks:
-          - name: "{{ network_name }}"
-        ports:
-          - "{{ app_port }}:8080"
-        env:
-          NODE_ENV: "production"
-          MONGO_DB_URL: "mongodb://{{ app_name }}-mongodb:27017/{{ app_name }}"
-          SECRET_KEY: "{{ secret_key }}"
-        labels:
-          app: fundgaze
-          environment: production
+    - name: Show PM2 status
+      command: pm2 list
+      become_user: deploy
+      register: pm2_status
 
-    # ----------------------------------------------------------
-    - name: Verify app container is running
-      community.docker.docker_container_info:
-        name: "{{ app_name }}-app"
-      register: app_info
-
-    - name: Show app container status
+    - name: Display PM2 status
       debug:
-        msg: "FundGaze app is {{ app_info.container.State.Status }} on Linux server {{ inventory_hostname }} at port {{ app_port }}"
+        msg: "{{ pm2_status.stdout }}"
 
-    # ----------------------------------------------------------
-    - name: Clean up unused Docker images
-      community.docker.docker_prune:
-        images: yes
-        images_filters:
-          dangling: true
+    - name: Deployment summary
+      debug:
+        msg: >
+          FundGaze deployed on Linux (172.17.86.44).
+          App URL : http://172.17.86.44:{{ app_port }}
+          MongoDB : mongodb://127.0.0.1:{{ mongo_port }}/{{ app_name }}
+          Windows app connects to MongoDB at: mongodb://172.17.86.44:{{ mongo_port }}/{{ app_name }}
