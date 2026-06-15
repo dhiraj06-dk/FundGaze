@@ -8,7 +8,7 @@
 # ============================================================
 
 - name: Deploy FundGaze on Windows Server using PM2
-  hosts: windows_servers
+  hosts: windows
   vars:
     app_name: fundgaze
     app_port: 8080

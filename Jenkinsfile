@@ -71,7 +71,7 @@ pipeline {
                     ansible-playbook -i ansible/inventory.ini \
                         ansible/deploy-linux.yml \
                         -e "secret_key=${SECRET_KEY}" \
-                        --limit linux_servers
+                        --limit linux
                 """
             }
         }
@@ -85,7 +85,7 @@ pipeline {
                     ansible-playbook -i ansible/inventory.ini \
                         ansible/deploy-windows.yml \
                         -e "secret_key=${SECRET_KEY}" \
-                        --limit windows_servers
+                        --limit windows
                 """
             }
         }

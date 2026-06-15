@@ -7,7 +7,7 @@
 # ============================================================
 
 - name: Deploy FundGaze on Linux Server using PM2
-  hosts: linux_servers
+  hosts: linux
   become: yes
   vars:
     app_name: fundgaze
