@@ -14,7 +14,7 @@ pipeline {
         // --- Jenkins Credentials (configure these in Jenkins > Manage Credentials) ---
         SECRET_KEY         = credentials('fundgaze-secret-key')       // Secret Text
         DOCKERHUB_CREDS    = credentials('dockerhub-credentials')     // Username + Password
-        WINDOWS_PASS       = credentials('windows-deployuser-pass')   // Secret Text (deployuser password)
+        WINDOWS_PASS       = credentials('windows-deployuser-creds')   // Secret Text (deployuser password)
     }
 
     options {
