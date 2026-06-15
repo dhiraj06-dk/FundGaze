@@ -18,6 +18,9 @@
     mongo_port: 27017
     secret_key: "{{ lookup('env', 'SECRET_KEY') | default('change_this_secret', true) }}"
     node_env: production
+    # Docker Hub credentials - passed from Jenkins at runtime, never hardcoded
+    dockerhub_user: "{{ lookup('env', 'DOCKERHUB_USER') | default('', true) }}"
+    dockerhub_pass: "{{ lookup('env', 'DOCKERHUB_PASS') | default('', true) }}"
 
   tasks:
 
@@ -81,6 +84,11 @@
     # ----------------------------------------------------------
     # 3. RUN MONGODB CONTAINER
     # ----------------------------------------------------------
+    - name: Docker Hub login (avoids unauthenticated pull rate limits)
+      command: docker login -u "{{ dockerhub_user }}" -p "{{ dockerhub_pass }}"
+      when: dockerhub_user != '' and dockerhub_pass != ''
+      no_log: true
+
     - name: Pull MongoDB 7.0 image
       command: docker pull mongo:7.0
       changed_when: false
@@ -113,6 +121,11 @@
         host: 127.0.0.1
         port: "{{ mongo_port }}"
         timeout: 60
+
+    - name: Docker Hub logout
+      command: docker logout
+      when: dockerhub_user != '' and dockerhub_pass != ''
+      failed_when: false
 
     # ----------------------------------------------------------
     # 4. OPEN FIREWALL PORTS

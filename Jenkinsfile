@@ -15,6 +15,8 @@ pipeline {
 
         // --- Secrets (stored in Jenkins Credentials) ---
         SECRET_KEY         = credentials('fundgaze-secret-key')   // Jenkins secret text credential ID
+        // --- Docker Hub (for authenticated pulls - avoids rate limits) ---
+        DOCKERHUB_CREDS    = credentials('dockerhub-credentials')  // Jenkins username+password credential ID
     }
 
     options {
@@ -70,8 +72,8 @@ pipeline {
                 sh """
                     ansible-playbook -i ansible/inventory.ini \
                         ansible/deploy-linux.yml \
-                        -e "secret_key=${SECRET_KEY}" \
-                        --limit linux
+                        -e "secret_key=${SECRET_KEY}" \                        -e "dockerhub_user=${DOCKERHUB_CREDS_USR}" \\
+                        -e "dockerhub_pass=${DOCKERHUB_CREDS_PSW}" \\                        --limit linux
                 """
             }
         }
