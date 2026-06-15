@@ -1,120 +1,79 @@
 ---
-# ============================================================
-# Ansible Playbook: Deploy FundGaze on Windows Server (PM2)
-# Target   : 172.17.86.182  |  User: deployuser
-# MongoDB  : Runs on Linux server (172.17.86.44:27017)
-#            NO MongoDB installation needed on Windows
-# Prereqs  : Node.js and PM2 already installed on Windows
-# ============================================================
-
-- name: Deploy FundGaze on Windows Server using PM2
+- name: Deploy FundGaze to Windows
   hosts: windows
+
   vars:
     app_name: fundgaze
-    app_port: 8080
-    app_dir: "C:\\fundgaze"
-    github_repo: "https://github.com/dhiraj06-dk/FundGaze.git"
-    github_branch: main
-    # MongoDB runs on Linux server - Windows connects remotely
-    mongo_host: "172.17.86.44"
+    app_dir: C:\fundgaze
+    mongo_host: 172.17.86.44
     mongo_port: 27017
-    secret_key: "{{ lookup('env', 'SECRET_KEY') | default('change_this_secret', true) }}"
-    node_env: production
+    secret_key: "{{ secret_key | default('change_this_secret') }}"
 
   tasks:
 
     # ----------------------------------------------------------
-    # 1. VERIFY PREREQUISITES
+    # 1. APPLICATION DEPLOYMENT (artifact-based)
     # ----------------------------------------------------------
-    - name: Check Node.js version
-      win_command: node --version
-      register: node_version
-      failed_when: node_version.rc != 0
+    - name: Create deployment directory
+      win_file:
+        path: "{{ app_dir }}"
+        state: directory
 
-    - name: Display Node.js version
-      debug:
-        msg: "Node.js: {{ node_version.stdout }}"
+    - name: Copy artifact from Jenkins
+      win_copy:
+        src: ../artifact/fundgaze.zip
+        dest: C:\Temp\fundgaze.zip
 
-    - name: Check PM2 version
-      win_command: pm2 --version
-      register: pm2_version
-      failed_when: pm2_version.rc != 0
+    - name: Remove old deployment
+      win_file:
+        path: "{{ app_dir }}"
+        state: absent
 
-    - name: Display PM2 version
-      debug:
-        msg: "PM2: {{ pm2_version.stdout }}"
+    - name: Recreate deployment folder
+      win_file:
+        path: "{{ app_dir }}"
+        state: directory
 
-    # ----------------------------------------------------------
-    # 2. DEPLOY APPLICATION CODE
-    # ----------------------------------------------------------
-    - name: Check if repo already cloned
-      win_stat:
-        path: "{{ app_dir }}\\.git"
-      register: repo_check
+    - name: Extract artifact
+      community.windows.win_unzip:
+        src: C:\Temp\fundgaze.zip
+        dest: "{{ app_dir }}"
 
-    - name: Clone repository (first time)
-      win_command: git clone {{ github_repo }} {{ app_dir }}
-      when: not repo_check.stat.exists
-
-    - name: Pull latest code (subsequent runs)
-      win_shell: |
-        cd {{ app_dir }}
-        git fetch origin
-        git reset --hard origin/{{ github_branch }}
-      when: repo_check.stat.exists
-
-    # ----------------------------------------------------------
-    # 3. CREATE .env FILE
-    # ----------------------------------------------------------
-    - name: Create .env file pointing to Linux MongoDB
+    - name: Create .env file (connects to Linux MongoDB)
       win_copy:
         dest: "{{ app_dir }}\\.env"
         content: |
-          NODE_ENV={{ node_env }}
+          NODE_ENV=production
           MONGO_DB_URL=mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ app_name }}
           SECRET_KEY={{ secret_key }}
 
-    # ----------------------------------------------------------
-    # 4. INSTALL NODE DEPENDENCIES
-    # ----------------------------------------------------------
     - name: Install Node.js dependencies
       win_shell: |
         cd {{ app_dir }}
-        npm ci --only=production
-      register: npm_result
-
-    - name: Show npm install output
-      debug:
-        msg: "{{ npm_result.stdout }}"
+        npm ci --production
 
     # ----------------------------------------------------------
-    # 5. START / RESTART WITH PM2
+    # 2. PM2 START / RESTART
     # ----------------------------------------------------------
-    - name: Check if app is running in PM2
-      win_shell: pm2 describe {{ app_name }}
-      register: pm2_check
-      failed_when: false
+    - name: Stop existing PM2 process
+      win_shell: pm2 delete {{ app_name }}
+      ignore_errors: yes
 
-    - name: Start app with PM2 (first time)
+    - name: Start application with PM2
       win_shell: |
         cd {{ app_dir }}
         pm2 start index.js --name {{ app_name }}
-      when: pm2_check.rc != 0
-
-    - name: Reload app with PM2 (zero-downtime restart)
-      win_shell: pm2 reload {{ app_name }}
-      when: pm2_check.rc == 0
 
     - name: Save PM2 process list
       win_shell: pm2 save
 
     # ----------------------------------------------------------
-    # 6. OPEN WINDOWS FIREWALL PORT
+    # 3. OPEN FIREWALL PORT
     # ----------------------------------------------------------
-    - name: Allow app port {{ app_port }} through Windows Firewall
+    - name: Allow port 8080 through Windows Firewall
       win_firewall_rule:
-        name: "FundGaze App Port {{ app_port }}"
-        localport: "{{ app_port }}"
+        name: "FundGaze App 8080"
+        localport: 8080
         action: allow
         direction: in
         protocol: tcp
@@ -122,39 +81,11 @@
         enabled: yes
 
     # ----------------------------------------------------------
-    # 7. TEST MONGODB CONNECTIVITY FROM WINDOWS
+    # 4. VERIFY
     # ----------------------------------------------------------
-    - name: Test TCP connectivity to MongoDB on Linux server
-      win_shell: |
-        $tcpClient = New-Object System.Net.Sockets.TcpClient
-        try {
-            $tcpClient.Connect("{{ mongo_host }}", {{ mongo_port }})
-            Write-Host "SUCCESS: Can reach MongoDB at {{ mongo_host }}:{{ mongo_port }}"
-        } catch {
-            Write-Host "FAILED: Cannot reach MongoDB at {{ mongo_host }}:{{ mongo_port }} - $_"
-        } finally {
-            $tcpClient.Close()
-        }
-      register: mongo_connectivity
-
-    - name: MongoDB connectivity result
-      debug:
-        msg: "{{ mongo_connectivity.stdout }}"
-
-    # ----------------------------------------------------------
-    # 8. VERIFY
-    # ----------------------------------------------------------
-    - name: Show PM2 status
+    - name: Verify PM2 status
       win_shell: pm2 list
       register: pm2_status
 
-    - name: Display PM2 status
-      debug:
-        msg: "{{ pm2_status.stdout }}"
-
-    - name: Deployment summary
-      debug:
-        msg: >
-          FundGaze deployed on Windows (172.17.86.182).
-          App URL  : http://172.17.86.182:{{ app_port }}
-          MongoDB  : mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ app_name }} (Linux server)
+    - debug:
+        var: pm2_status.stdout_lines
