@@ -116,7 +116,7 @@
 
     - name: Copy artifact from Jenkins
       copy:
-        src: ../artifact/fundgaze.zip
+        src: artifact/fundgaze.zip
         dest: /tmp/fundgaze.zip
 
     - name: Remove previous deployment

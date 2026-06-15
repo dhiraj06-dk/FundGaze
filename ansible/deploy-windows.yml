@@ -21,7 +21,7 @@
 
     - name: Copy artifact from Jenkins
       win_copy:
-        src: ../artifact/fundgaze.zip
+        src: artifact/fundgaze.zip
         dest: C:\Temp\fundgaze.zip
 
     - name: Remove old deployment
