@@ -38,7 +38,7 @@ pipeline {
 
                 withSonarQubeEnv("${SONAR_SERVER}") {
                     sh """
-                        sonar-scanner \
+                    ${scannerHome}/bin/sonar-scanner \
                         -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                         -Dsonar.projectName=FundGaze \
                         -Dsonar.sources=. \
