@@ -30,12 +30,13 @@
             creates: /etc/yum.repos.d/docker-ce.repo
 
         - name: Install Docker CE packages
-          yum:
+          dnf:
             name:
               - docker-ce
               - docker-ce-cli
               - containerd.io
             state: present
+            allowerasing: yes
 
         - name: Start and enable Docker service
           service:
@@ -94,7 +95,6 @@
 
     - name: Open MongoDB port 27017 in firewall (for Windows server)
       shell: firewall-cmd --permanent --add-port={{ mongo_port }}/tcp
-      when: ansible_facts['os_family'] == 'Windows'
       failed_when: false
       changed_when: false
       
