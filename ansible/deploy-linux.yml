@@ -88,20 +88,20 @@
         timeout: 60
 
     - name: Open app port 8080 in firewall
-      ansible.posix.firewalld:
-        port: 8080/tcp
-        permanent: yes
-        state: enabled
-        immediate: yes
+      shell: firewall-cmd --permanent --add-port=8080/tcp
       failed_when: false
+      changed_when: false
 
     - name: Open MongoDB port 27017 in firewall (for Windows server)
-      firewalld:
-        port: "{{ mongo_port }}/tcp"
-        permanent: yes
-        state: enabled
-        immediate: yes
+      shell: firewall-cmd --permanent --add-port={{ mongo_port }}/tcp
+      when: ansible_facts['os_family'] == 'Windows'
       failed_when: false
+      changed_when: false
+      
+    - name: Reload firewall to apply changes
+      shell: firewall-cmd --reload
+      failed_when: false
+      changed_when: false
 
     # ----------------------------------------------------------
     # 2. APPLICATION DEPLOYMENT (artifact-based)
