@@ -35,16 +35,20 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 echo "Running SonarQube Analysis..."
+                script {
+                    def scannerHome = tool 'SonarScanner'
+                
 
                 withSonarQubeEnv("${SONAR_SERVER}") {
                     sh """
-                    ${scannerHome}/bin/sonar-scanner \
+                        ${scannerHome}/bin/sonar-scanner \
                         -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                         -Dsonar.projectName=FundGaze \
                         -Dsonar.sources=. \
                         -Dsonar.exclusions=node_modules/**,public/**,views/**,artifact/**,ansible/**
                     """
                 }
+              }
             }
         }
 
