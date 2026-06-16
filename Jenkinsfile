@@ -35,20 +35,20 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 echo "Running SonarQube Analysis..."
+
                 script {
                     def scannerHome = tool 'SonarScanner'
-                
 
-                withSonarQubeEnv("${SONAR_SERVER}") {
-                    sh """
-                        ${scannerHome}/bin/sonar-scanner \
-                        -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                        -Dsonar.projectName=FundGaze \
-                        -Dsonar.sources=. \
-                        -Dsonar.exclusions=node_modules/**,public/**,views/**,artifact/**,ansible/**
-                    """
+                    withSonarQubeEnv("${SONAR_SERVER}") {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                            -Dsonar.projectName=FundGaze \
+                            -Dsonar.sources=. \
+                            -Dsonar.exclusions=node_modules/**,public/**,views/**,artifact/**,ansible/**
+                        """
+                    }
                 }
-              }
             }
         }
 
@@ -85,17 +85,16 @@ pipeline {
             steps {
                 echo "Deploying to Linux Server..."
 
-                sshagent(credentials: ['linux-deploy-key']){
-
-                sh """
-                    ansible-playbook \
-                    -i ansible/inventory.ini \
-                    ansible/deploy-linux.yml \
-                    -e "secret_key=${SECRET_KEY}" \
-                    -e "dockerhub_user=${DOCKERHUB_CREDS_USR}" \
-                    -e "dockerhub_pass=${DOCKERHUB_CREDS_PSW}" \
-                    --limit linux
-                """
+                sshagent(credentials: ['linux-deploy-key']) {
+                    sh """
+                        ansible-playbook \
+                        -i ansible/inventory.ini \
+                        ansible/deploy-linux.yml \
+                        -e "secret_key=${SECRET_KEY}" \
+                        -e "dockerhub_user=${DOCKERHUB_CREDS_USR}" \
+                        -e "dockerhub_pass=${DOCKERHUB_CREDS_PSW}" \
+                        --limit linux
+                    """
                 }
             }
         }
@@ -104,7 +103,6 @@ pipeline {
             steps {
                 echo "Deploying to Windows Server..."
 
-                
                 sh """
                     ansible-playbook \
                     -i ansible/inventory.ini \
@@ -113,7 +111,7 @@ pipeline {
                     -e "ansible_password=${WINDOWS_PASS_PSW}" \
                     --limit windows
                 """
-            
+            }
         }
     }
 
