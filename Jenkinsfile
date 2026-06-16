@@ -85,6 +85,8 @@ pipeline {
             steps {
                 echo "Deploying to Linux Server..."
 
+                sshagent(credentials: ['linux-deploy-key']){
+
                 sh """
                     ansible-playbook \
                     -i ansible/inventory.ini \
@@ -94,6 +96,7 @@ pipeline {
                     -e "dockerhub_pass=${DOCKERHUB_CREDS_PSW}" \
                     --limit linux
                 """
+                }
             }
         }
 
@@ -101,6 +104,7 @@ pipeline {
             steps {
                 echo "Deploying to Windows Server..."
 
+                
                 sh """
                     ansible-playbook \
                     -i ansible/inventory.ini \
@@ -109,7 +113,7 @@ pipeline {
                     -e "ansible_password=${WINDOWS_PASS_PSW}" \
                     --limit windows
                 """
-            }
+            
         }
     }
 
