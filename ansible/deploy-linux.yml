@@ -88,7 +88,7 @@
         timeout: 60
 
     - name: Open app port 8080 in firewall
-      firewalld:
+      ansible.posix.firewalld:
         port: 8080/tcp
         permanent: yes
         state: enabled
