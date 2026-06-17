@@ -30,6 +30,11 @@
         src: "{{ playbook_dir }}/../artifact/fundgaze.zip"
         dest: "{{ temp_dir }}\\fundgaze.zip"
 
+    - name: Stop existing PM2 process (release file locks before delete)
+      win_shell: pm2 delete {{ app_name }}
+      ignore_errors: yes
+      changed_when: false
+
     - name: Remove old deployment
       win_file:
         path: "{{ app_dir }}"
@@ -61,13 +66,8 @@
       failed_when: npm_install_result.rc != 0
 
     # ----------------------------------------------------------
-    # 2. PM2 START / RESTART
+    # 2. PM2 START
     # ----------------------------------------------------------
-    - name: Stop existing PM2 process
-      win_shell: pm2 delete {{ app_name }}
-      ignore_errors: yes
-      changed_when: false
-
     - name: Start application with PM2
       win_shell: |
         cd {{ app_dir }}
