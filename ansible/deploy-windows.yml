@@ -5,6 +5,7 @@
   vars:
     app_name: fundgaze
     app_dir: C:\fundgaze
+    temp_dir: C:\Temp
     mongo_host: 172.17.86.44
     mongo_port: 27017
     secret_key: "{{ secret_key | default('change_this_secret') }}"
@@ -14,6 +15,11 @@
     # ----------------------------------------------------------
     # 1. APPLICATION DEPLOYMENT (artifact-based)
     # ----------------------------------------------------------
+    - name: Ensure temp directory exists
+      win_file:
+        path: "{{ temp_dir }}"
+        state: directory
+
     - name: Create deployment directory
       win_file:
         path: "{{ app_dir }}"
@@ -22,7 +28,7 @@
     - name: Copy artifact from Jenkins
       win_copy:
         src: "{{ playbook_dir }}/../artifact/fundgaze.zip"
-        dest: C:\Temp\fundgaze.zip
+        dest: "{{ temp_dir }}\\fundgaze.zip"
 
     - name: Remove old deployment
       win_file:
@@ -36,7 +42,7 @@
 
     - name: Extract artifact
       community.windows.win_unzip:
-        src: C:\Temp\fundgaze.zip
+        src: "{{ temp_dir }}\\fundgaze.zip"
         dest: "{{ app_dir }}"
 
     - name: Create .env file (connects to Linux MongoDB)
@@ -51,6 +57,8 @@
       win_shell: |
         cd {{ app_dir }}
         npm ci --production
+      register: npm_install_result
+      failed_when: npm_install_result.rc != 0
 
     # ----------------------------------------------------------
     # 2. PM2 START / RESTART
@@ -58,6 +66,7 @@
     - name: Stop existing PM2 process
       win_shell: pm2 delete {{ app_name }}
       ignore_errors: yes
+      changed_when: false
 
     - name: Start application with PM2
       win_shell: |
@@ -66,6 +75,7 @@
 
     - name: Save PM2 process list
       win_shell: pm2 save
+      changed_when: false
 
     # ----------------------------------------------------------
     # 3. OPEN FIREWALL PORT
@@ -83,9 +93,26 @@
     # ----------------------------------------------------------
     # 4. VERIFY
     # ----------------------------------------------------------
+    - name: Wait for application to respond on port 8080
+      win_uri:
+        url: "http://localhost:8080"
+        status_code: [200, 301, 302, 404]
+        timeout: 10
+      register: health_check
+      retries: 10
+      delay: 5
+      until: health_check.status_code is defined
+      ignore_errors: yes
+
     - name: Verify PM2 status
       win_shell: pm2 list
       register: pm2_status
+      changed_when: false
 
     - debug:
         var: pm2_status.stdout_lines
+
+    - name: Cleanup temp artifact
+      win_file:
+        path: "{{ temp_dir }}\\fundgaze.zip"
+        state: absent
