@@ -1,0 +1,103 @@
+---
+# ================================================================
+# Playbook  : deploy-docker-server.yml
+# Purpose   : Pull the newly built image from the internal registry
+#             (172.17.86.207:5000) and run it as a container on the
+#             test Docker server (172.17.86.45).
+# Connects  : SSH
+# ================================================================
+
+- name: Deploy FundGaze container to Docker test server
+  hosts: docker_test_server
+  become: yes
+
+  vars:
+    container_name: fundgaze
+    app_port: 8080
+    registry_host: "{{ registry_host }}"
+    image_name: "{{ image_name }}"
+    image_tag: "{{ image_tag }}"
+    mongo_host: 172.17.86.44
+    mongo_port: 27017
+    secret_key: "{{ secret_key | default('change_this_secret') }}"
+
+  tasks:
+
+    # ----------------------------------------------------------
+    # 1. Confirm Docker is installed and running
+    # ----------------------------------------------------------
+    - name: Check Docker is installed
+      command: docker --version
+      register: docker_check
+      changed_when: false
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    # ----------------------------------------------------------
+    # 2. Pull the new image from the internal registry
+    # ----------------------------------------------------------
+    - name: Pull latest image from internal registry
+      command: docker pull {{ registry_host }}/{{ image_name }}:{{ image_tag }}
+      register: pull_result
+      changed_when: "'Downloaded newer image' in pull_result.stdout"
+
+    # ----------------------------------------------------------
+    # 3. Stop and remove the old container (if running)
+    # ----------------------------------------------------------
+    - name: Check if container already exists
+      command: docker inspect {{ container_name }}
+      register: container_check
+      failed_when: false
+      changed_when: false
+
+    - name: Stop and remove existing container
+      command: docker rm -f {{ container_name }}
+      when: container_check.rc == 0
+      changed_when: true
+
+    # ----------------------------------------------------------
+    # 4. Run the new container
+    # ----------------------------------------------------------
+    - name: Run new container from updated image
+      command: >
+        docker run -d
+        --name {{ container_name }}
+        --restart unless-stopped
+        -p {{ app_port }}:8080
+        -e NODE_ENV=production
+        -e MONGO_DB_URL=mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ image_name }}
+        -e SECRET_KEY={{ secret_key }}
+        {{ registry_host }}/{{ image_name }}:{{ image_tag }}
+
+    # ----------------------------------------------------------
+    # 5. Verify the container is healthy
+    # ----------------------------------------------------------
+    - name: Wait for application to respond
+      uri:
+        url: "http://localhost:{{ app_port }}"
+        status_code: [200, 301, 302, 404]
+        timeout: 10
+      register: health_result
+      retries: 10
+      delay: 5
+      until: health_result.status is defined
+      ignore_errors: yes
+
+    - name: Show running containers
+      command: docker ps --filter "name={{ container_name }}"
+      register: ps_result
+      changed_when: false
+
+    - debug:
+        var: ps_result.stdout_lines
+
+    # ----------------------------------------------------------
+    # 6. Cleanup old/dangling images to save disk space
+    # ----------------------------------------------------------
+    - name: Remove dangling images
+      command: docker image prune -f
+      changed_when: false

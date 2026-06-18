@@ -10,6 +10,12 @@ pipeline {
         APP_PORT          = "8080"
         LINUX_SERVER_IP   = "172.17.86.44"
         WINDOWS_SERVER_IP = "172.17.86.182"
+        DOCKER_SERVER_IP  = "172.17.86.45"
+
+        // Internal Registry
+        REGISTRY_HOST     = "172.17.86.207:5000"
+        IMAGE_NAME         = "fundgaze"
+        IMAGE_TAG          = "${env.BUILD_NUMBER}"
 
         // Jenkins Credentials
         SECRET_KEY      = credentials('fundgaze-secret-key')
@@ -113,6 +119,64 @@ pipeline {
                 """
             }
         }
+
+        // ============================================================
+        // NEW STAGES: Build image, scan, push to registry, deploy to
+        // the test Docker server
+        // ============================================================
+
+        stage('Build Docker Image') {
+            steps {
+                echo "Building Docker image..."
+                sh """
+                    docker build -t ${REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_TAG} .
+                    docker tag ${REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_TAG} ${REGISTRY_HOST}/${IMAGE_NAME}:latest
+                """
+            }
+        }
+
+        stage('Scan Image with Trivy') {
+            steps {
+                echo "Scanning image with Trivy (report only, non-blocking)..."
+                sh """
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 0 \
+                        --format table \
+                        ${REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_TAG} \
+                        | tee trivy-report.txt
+                """
+                archiveArtifacts artifacts: 'trivy-report.txt', allowEmptyArchive: true
+            }
+        }
+
+        stage('Push to Internal Registry') {
+            steps {
+                echo "Pushing image to internal registry..."
+                sh """
+                    docker push ${REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_TAG}
+                    docker push ${REGISTRY_HOST}/${IMAGE_NAME}:latest
+                """
+            }
+        }
+
+        stage('Deploy to Docker Server') {
+            steps {
+                echo "Deploying image to Docker test server..."
+                sshagent(credentials: ['docker-server-ssh-key']) {
+                    sh """
+                        ansible-playbook \
+                            -i ansible/inventory.ini \
+                            ansible/deploy-docker-server.yml \
+                            -e "registry_host=${REGISTRY_HOST}" \
+                            -e "image_name=${IMAGE_NAME}" \
+                            -e "image_tag=${IMAGE_TAG}" \
+                            -e "secret_key=${SECRET_KEY}" \
+                            --limit docker_test_server
+                    """
+                }
+            }
+        }
     }
 
     post {
@@ -128,8 +192,14 @@ http://${LINUX_SERVER_IP}:${APP_PORT}
 Windows URL:
 http://${WINDOWS_SERVER_IP}:${APP_PORT}
 
+Docker Server URL:
+http://${DOCKER_SERVER_IP}:${APP_PORT}
+
 MongoDB:
 mongodb://${LINUX_SERVER_IP}:27017/fundgaze
+
+Image pushed to registry:
+${REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_TAG}
 =================================================
 """
         }
