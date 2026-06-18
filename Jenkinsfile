@@ -127,6 +127,10 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
+                echo "Logging into DockerHub to avoid rate limits..."
+                sh """
+                    echo ${DOCKERHUB_CREDS_PSW} | docker login -u ${DOCKERHUB_CREDS_USR} --password-stdin
+                """
                 echo "Building Docker image..."
                 sh """
                     docker build -t ${REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_TAG} .

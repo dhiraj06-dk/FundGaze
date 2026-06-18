@@ -11,3 +11,6 @@
 
 - name: Deploy FundGaze to Windows Server
   import_playbook: deploy-windows.yml
+  
+- name: Deploy FundGaze to Docker Test Server
+  import_playbook: deploy-docker-server.yml
