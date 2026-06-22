@@ -159,10 +159,15 @@
       ignore_errors: yes
       changed_when: false
 
-    - name: Start Nginx under PM2
+    - name: Kill any stale nginx.exe processes (clears port locks)
+      win_shell: taskkill /f /im nginx.exe
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Start Nginx under PM2 (no-autorestart avoids PM2 fork loop on Windows)
       win_shell: |
         cd {{ nginx_dir }}
-        pm2 start nginx.exe --name nginx-proxy
+        pm2 start nginx.exe --name nginx-proxy --no-autorestart
 
     - name: Save PM2 process list (app + nginx)
       win_shell: pm2 save
