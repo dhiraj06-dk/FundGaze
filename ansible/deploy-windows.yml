@@ -116,13 +116,37 @@
         path: "{{ nginx_cert_dir }}\\fundgaze.crt"
       register: cert_check
 
-    - name: Generate self-signed certificate via Git Bash OpenSSL (first run only)
-      win_shell: |
-        & "C:\Program Files\Git\usr\bin\openssl.exe" req -newkey rsa:4096 -nodes -sha256 `
-          -keyout "{{ nginx_cert_dir }}\fundgaze.key" -x509 -days 3650 `
-          -out "{{ nginx_cert_dir }}\fundgaze.crt" `
-          -subj "/CN={{ ansible_host }}" `
-          -addext "subjectAltName=IP:{{ ansible_host }}"
+    - name: Generate self-signed certificate on Jenkins controller (no OpenSSL needed on Windows)
+      command: >
+        openssl req -newkey rsa:4096 -nodes -sha256
+        -keyout /tmp/fundgaze-windows.key
+        -x509 -days 3650
+        -out /tmp/fundgaze-windows.crt
+        -subj "/CN={{ ansible_host }}"
+        -addext "subjectAltName=IP:{{ ansible_host }}"
+      delegate_to: localhost
+      when: not cert_check.stat.exists
+
+    - name: Copy certificate to Windows VM
+      win_copy:
+        src: /tmp/fundgaze-windows.crt
+        dest: "{{ nginx_cert_dir }}\\fundgaze.crt"
+      when: not cert_check.stat.exists
+
+    - name: Copy private key to Windows VM
+      win_copy:
+        src: /tmp/fundgaze-windows.key
+        dest: "{{ nginx_cert_dir }}\\fundgaze.key"
+      when: not cert_check.stat.exists
+
+    - name: Remove temp cert files from Jenkins controller
+      file:
+        path: "{{ item }}"
+        state: absent
+      delegate_to: localhost
+      loop:
+        - /tmp/fundgaze-windows.key
+        - /tmp/fundgaze-windows.crt
       when: not cert_check.stat.exists
 
     - name: Deploy Nginx TLS reverse proxy config

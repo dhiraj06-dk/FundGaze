@@ -216,6 +216,13 @@
         state: absent
       failed_when: false
 
+    - name: Allow Nginx to proxy to app (SELinux on RHEL/CentOS)
+      seboolean:
+        name: httpd_can_network_connect
+        state: yes
+        persistent: yes
+      failed_when: false
+
     - name: Enable and start Nginx
       systemd:
         name: nginx
@@ -238,6 +245,9 @@
     # ----------------------------------------------------------
     # 5. VERIFY
     # ----------------------------------------------------------
+    - name: Flush handlers (ensure Nginx reloaded before verify)
+      meta: flush_handlers
+
     - name: Verify application is listening on port 8080
       wait_for:
         port: "{{ app_port }}"

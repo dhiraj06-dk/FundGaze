@@ -139,8 +139,8 @@
         --restart unless-stopped
         --network {{ network_name }}
         -p 443:443 -p 80:80
-        -v {{ cert_dir }}:/etc/nginx/certs
-        -v {{ conf_dir }}:/etc/nginx/conf.d
+        -v {{ cert_dir }}:/etc/nginx/certs:z
+        -v {{ conf_dir }}:/etc/nginx/conf.d:z
         nginx:alpine
 
     # ----------------------------------------------------------
@@ -162,18 +162,14 @@
     # ----------------------------------------------------------
     # 8. VERIFY
     # ----------------------------------------------------------
-    - name: Wait for application to respond internally
-      uri:
-        url: "http://localhost:{{ app_port }}"
-        status_code: [200, 301, 302, 404]
-        timeout: 10
+    - name: Wait for app container to be healthy (via docker exec)
+      command: docker exec {{ container_name }} node -e "require('http').get('http://localhost:{{ app_port }}/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
       register: health_result
       retries: 10
       delay: 5
-      until: health_result.status is defined
+      until: health_result.rc == 0
       ignore_errors: yes
-      # Note: app_port is no longer published to the host directly,
-      # this check is best-effort; HTTPS check below is authoritative.
+      changed_when: false
 
     - name: Verify HTTPS endpoint responds
       uri:
