@@ -8,8 +8,8 @@ server {
     listen 443 ssl;
     server_name {{ ansible_host }};
 
-    ssl_certificate     /etc/nginx/certs/fundgaze.crt;
-    ssl_certificate_key /etc/nginx/certs/fundgaze.key;
+    ssl_certificate     C:/nginx/certs/fundgaze.crt;
+    ssl_certificate_key C:/nginx/certs/fundgaze.key;
 
     location / {
         proxy_pass http://127.0.0.1:{{ app_port }};

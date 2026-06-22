@@ -163,7 +163,12 @@
     # 8. VERIFY
     # ----------------------------------------------------------
     - name: Wait for app container to be healthy (via docker exec)
-      command: docker exec {{ container_name }} node -e "require('http').get('http://localhost:{{ app_port }}/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
+      shell: >-
+        docker exec {{ container_name }} node -e
+        "var h=require('http');
+        h.get('http://localhost:{{ app_port }}/',
+        function(r){ process.exit(r.statusCode < 500 ? 0 : 1); })
+        .on('error', function(){ process.exit(1); });"
       register: health_result
       retries: 10
       delay: 5
