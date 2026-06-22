@@ -2,8 +2,8 @@
 # ================================================================
 # Playbook  : deploy-docker-server.yml
 # Purpose   : Pull the newly built image from the internal registry
-#             (172.17.86.207:5000) and run it as a container on the
-#             test Docker server (172.17.86.45).
+#             and run it as a container on the Docker test server,
+#             fronted by an Nginx TLS sidecar container on 443.
 # Connects  : SSH
 # ================================================================
 
@@ -13,6 +13,7 @@
 
   vars:
     container_name: fundgaze
+    network_name: fundgaze-net
     app_port: 8080
     registry_host: "{{ registry_host }}"
     image_name: "{{ image_name }}"
@@ -20,6 +21,8 @@
     mongo_host: 172.17.86.44
     mongo_port: 27017
     secret_key: "{{ secret_key | default('change_this_secret') }}"
+    cert_dir: /opt/nginx/certs
+    conf_dir: /opt/nginx/conf.d
 
   tasks:
 
@@ -38,7 +41,20 @@
         enabled: yes
 
     # ----------------------------------------------------------
-    # 2. Pull the new image from the internal registry
+    # 2. Shared network for app + nginx containers
+    # ----------------------------------------------------------
+    - name: Check if shared network already exists
+      command: docker network inspect {{ network_name }}
+      register: network_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create shared network for app and nginx
+      command: docker network create {{ network_name }}
+      when: network_check.rc != 0
+
+    # ----------------------------------------------------------
+    # 3. Pull the new image from the internal registry
     # ----------------------------------------------------------
     - name: Pull latest image from internal registry
       command: docker pull {{ registry_host }}/{{ image_name }}:{{ image_tag }}
@@ -46,37 +62,107 @@
       changed_when: "'Downloaded newer image' in pull_result.stdout"
 
     # ----------------------------------------------------------
-    # 3. Stop and remove the old container (if running)
+    # 4. Stop and remove the old app container (if running)
     # ----------------------------------------------------------
-    - name: Check if container already exists
+    - name: Check if app container already exists
       command: docker inspect {{ container_name }}
       register: container_check
       failed_when: false
       changed_when: false
 
-    - name: Stop and remove existing container
+    - name: Stop and remove existing app container
       command: docker rm -f {{ container_name }}
       when: container_check.rc == 0
       changed_when: true
 
     # ----------------------------------------------------------
-    # 4. Run the new container
+    # 5. Run the new app container on the shared network
     # ----------------------------------------------------------
     - name: Run new container from updated image
       command: >
         docker run -d
         --name {{ container_name }}
+        --network {{ network_name }}
         --restart unless-stopped
-        -p {{ app_port }}:8080
         -e NODE_ENV=production
         -e MONGO_DB_URL=mongodb://{{ mongo_host }}:{{ mongo_port }}/{{ image_name }}
         -e SECRET_KEY={{ secret_key }}
         {{ registry_host }}/{{ image_name }}:{{ image_tag }}
 
     # ----------------------------------------------------------
-    # 5. Verify the container is healthy
+    # 6. HTTPS REVERSE PROXY (Nginx container, self-signed cert)
     # ----------------------------------------------------------
-    - name: Wait for application to respond
+    - name: Ensure cert and conf directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ cert_dir }}"
+        - "{{ conf_dir }}"
+
+    - name: Check if self-signed certificate already exists
+      stat:
+        path: "{{ cert_dir }}/fundgaze.crt"
+      register: cert_check
+
+    - name: Generate self-signed certificate (first run only)
+      command: >
+        openssl req -newkey rsa:4096 -nodes -sha256
+        -keyout {{ cert_dir }}/fundgaze.key
+        -x509 -days 3650
+        -out {{ cert_dir }}/fundgaze.crt
+        -subj "/CN={{ ansible_host }}"
+        -addext "subjectAltName=IP:{{ ansible_host }}"
+      when: not cert_check.stat.exists
+
+    - name: Deploy Nginx TLS reverse proxy config
+      template:
+        src: templates/nginx-docker-tls.conf.j2
+        dest: "{{ conf_dir }}/fundgaze.conf"
+        mode: '0644'
+      register: nginx_conf
+
+    - name: Check if nginx-proxy container already exists
+      command: docker inspect nginx-proxy
+      register: nginx_container_check
+      failed_when: false
+      changed_when: false
+
+    - name: Remove existing nginx-proxy container (config changed or redeploy)
+      command: docker rm -f nginx-proxy
+      when: nginx_container_check.rc == 0
+
+    - name: Run Nginx TLS proxy container
+      command: >
+        docker run -d --name nginx-proxy
+        --restart unless-stopped
+        --network {{ network_name }}
+        -p 443:443 -p 80:80
+        -v {{ cert_dir }}:/etc/nginx/certs
+        -v {{ conf_dir }}:/etc/nginx/conf.d
+        nginx:alpine
+
+    # ----------------------------------------------------------
+    # 7. OPEN FIREWALL PORTS
+    # ----------------------------------------------------------
+    - name: Open firewall ports 80 and 443
+      shell: firewall-cmd --permanent --add-port={{ item }}/tcp
+      loop:
+        - "80"
+        - "443"
+      failed_when: false
+      changed_when: false
+
+    - name: Reload firewall after HTTPS port changes
+      shell: firewall-cmd --reload
+      failed_when: false
+      changed_when: false
+
+    # ----------------------------------------------------------
+    # 8. VERIFY
+    # ----------------------------------------------------------
+    - name: Wait for application to respond internally
       uri:
         url: "http://localhost:{{ app_port }}"
         status_code: [200, 301, 302, 404]
@@ -86,9 +172,22 @@
       delay: 5
       until: health_result.status is defined
       ignore_errors: yes
+      # Note: app_port is no longer published to the host directly,
+      # this check is best-effort; HTTPS check below is authoritative.
+
+    - name: Verify HTTPS endpoint responds
+      uri:
+        url: "https://{{ ansible_host }}"
+        validate_certs: no
+        status_code: [200, 301, 302, 404]
+      register: https_check
+      retries: 6
+      delay: 5
+      until: https_check.status is defined
+      ignore_errors: yes
 
     - name: Show running containers
-      command: docker ps --filter "name={{ container_name }}"
+      command: docker ps --filter "name={{ container_name }}" --filter "name=nginx-proxy"
       register: ps_result
       changed_when: false
 
@@ -96,7 +195,7 @@
         var: ps_result.stdout_lines
 
     # ----------------------------------------------------------
-    # 6. Cleanup old/dangling images to save disk space
+    # 9. Cleanup old/dangling images to save disk space
     # ----------------------------------------------------------
     - name: Remove dangling images
       command: docker image prune -f

@@ -1,4 +1,9 @@
 ---
+# ================================================================
+# Playbook: Deploy FundGaze to Windows
+# Includes: app deployment + HTTPS reverse proxy (Nginx, self-signed)
+# ================================================================
+
 - name: Deploy FundGaze to Windows
   hosts: windows
 
@@ -6,9 +11,12 @@
     app_name: fundgaze
     app_dir: C:\fundgaze
     temp_dir: C:\Temp
+    app_port: 8080
     mongo_host: 172.17.86.44
     mongo_port: 27017
     secret_key: "{{ secret_key | default('change_this_secret') }}"
+    nginx_dir: C:\nginx
+    nginx_cert_dir: C:\nginx\certs
 
   tasks:
 
@@ -73,14 +81,73 @@
         cd {{ app_dir }}
         pm2 start index.js --name {{ app_name }}
 
-    - name: Save PM2 process list
+    # ----------------------------------------------------------
+    # 3. NGINX + HTTPS REVERSE PROXY (Nginx for Windows, self-signed)
+    # ----------------------------------------------------------
+    - name: Check if Nginx for Windows is already installed
+      win_stat:
+        path: "{{ nginx_dir }}\\nginx.exe"
+      register: nginx_check
+
+    - name: Download Nginx for Windows (first run only)
+      win_get_url:
+        url: http://nginx.org/download/nginx-1.26.2.zip
+        dest: "{{ temp_dir }}\\nginx.zip"
+      when: not nginx_check.stat.exists
+
+    - name: Extract Nginx (first run only)
+      community.windows.win_unzip:
+        src: "{{ temp_dir }}\\nginx.zip"
+        dest: C:\
+      when: not nginx_check.stat.exists
+
+    - name: Rename extracted Nginx folder to C:\nginx (first run only)
+      win_command: cmd /c rename "C:\nginx-1.26.2" "nginx"
+      when: not nginx_check.stat.exists
+      ignore_errors: yes
+
+    - name: Ensure Nginx cert directory exists
+      win_file:
+        path: "{{ nginx_cert_dir }}"
+        state: directory
+
+    - name: Check if self-signed certificate already exists
+      win_stat:
+        path: "{{ nginx_cert_dir }}\\fundgaze.crt"
+      register: cert_check
+
+    - name: Generate self-signed certificate via Git Bash OpenSSL (first run only)
+      win_shell: |
+        & "C:\Program Files\Git\usr\bin\openssl.exe" req -newkey rsa:4096 -nodes -sha256 `
+          -keyout "{{ nginx_cert_dir }}\fundgaze.key" -x509 -days 3650 `
+          -out "{{ nginx_cert_dir }}\fundgaze.crt" `
+          -subj "/CN={{ ansible_host }}" `
+          -addext "subjectAltName=IP:{{ ansible_host }}"
+      when: not cert_check.stat.exists
+
+    - name: Deploy Nginx TLS reverse proxy config
+      win_template:
+        src: templates/nginx-windows-tls.conf.j2
+        dest: "{{ nginx_dir }}\\conf\\nginx.conf"
+
+    - name: Stop existing Nginx PM2 process (if running, to reload config)
+      win_shell: pm2 delete nginx-proxy
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Start Nginx under PM2
+      win_shell: |
+        cd {{ nginx_dir }}
+        pm2 start nginx.exe --name nginx-proxy
+
+    - name: Save PM2 process list (app + nginx)
       win_shell: pm2 save
       changed_when: false
 
     # ----------------------------------------------------------
-    # 3. OPEN FIREWALL PORT
+    # 4. OPEN FIREWALL PORTS
     # ----------------------------------------------------------
-    - name: Allow port 8080 through Windows Firewall
+    - name: Allow port 8080 through Windows Firewall (internal use)
       win_firewall_rule:
         name: "FundGaze App 8080"
         localport: 8080
@@ -90,8 +157,28 @@
         state: present
         enabled: yes
 
+    - name: Allow port 443 through Windows Firewall (HTTPS)
+      win_firewall_rule:
+        name: "FundGaze HTTPS 443"
+        localport: 443
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: yes
+
+    - name: Allow port 80 through Windows Firewall (HTTP redirect)
+      win_firewall_rule:
+        name: "FundGaze HTTP 80"
+        localport: 80
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: yes
+
     # ----------------------------------------------------------
-    # 4. VERIFY
+    # 5. VERIFY
     # ----------------------------------------------------------
     - name: Wait for application to respond on port 8080
       win_uri:
@@ -102,6 +189,18 @@
       retries: 10
       delay: 5
       until: health_check.status_code is defined
+      ignore_errors: yes
+
+    - name: Verify HTTPS endpoint responds
+      win_uri:
+        url: "https://localhost"
+        validate_certs: no
+        status_code: [200, 301, 302, 404]
+        timeout: 10
+      register: https_check
+      retries: 6
+      delay: 5
+      until: https_check.status_code is defined
       ignore_errors: yes
 
     - name: Verify PM2 status
