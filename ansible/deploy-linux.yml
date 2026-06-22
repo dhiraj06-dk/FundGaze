@@ -217,11 +217,9 @@
       failed_when: false
 
     - name: Allow Nginx to proxy to app (SELinux on RHEL/CentOS)
-      seboolean:
-        name: httpd_can_network_connect
-        state: yes
-        persistent: yes
+      command: setsebool -P httpd_can_network_connect 1
       failed_when: false
+      changed_when: false
 
     - name: Enable and start Nginx
       systemd:
