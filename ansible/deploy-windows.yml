@@ -149,10 +149,22 @@
         - /tmp/fundgaze-windows.crt
       when: not cert_check.stat.exists
 
-    - name: Deploy Nginx TLS reverse proxy config
-      win_template:
+    - name: Render Nginx config on Jenkins controller
+      template:
         src: templates/nginx-windows-tls.conf.j2
+        dest: /tmp/nginx-windows.conf
+      delegate_to: localhost
+
+    - name: Copy rendered Nginx config to Windows
+      win_copy:
+        src: /tmp/nginx-windows.conf
         dest: "{{ nginx_dir }}\\conf\\nginx.conf"
+
+    - name: Remove temp Nginx config from Jenkins controller
+      file:
+        path: /tmp/nginx-windows.conf
+        state: absent
+      delegate_to: localhost
 
     - name: Stop existing Nginx PM2 process (if running, to reload config)
       win_shell: pm2 delete nginx-proxy
